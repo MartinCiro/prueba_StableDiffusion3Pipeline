@@ -1,0 +1,52 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sd3-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - sd3-network
+
+  sd3-generator:
+    build: .
+    container_name: sd3-generator
+    restart: unless-stopped
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MODEL_CACHE_DIR=/app/models
+      - OUTPUT_DIR=/app/outputs
+    volumes:
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./src:/app/src
+    ports:
+      - "8000:8000"  # Opcional para API REST
+    depends_on:
+      - redis
+    networks:
+      - sd3-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Descomentar para CPU only:
+    # runtime: nvidia  # Para GPU
+    # shm_size: '8gb'  # Memoria compartida
+
+networks:
+  sd3-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local
