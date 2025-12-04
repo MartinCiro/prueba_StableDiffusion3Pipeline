@@ -1,49 +1,35 @@
-# Usar imagen con CUDA 12.1 y Python 3.10
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# Dockerfile corregido
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Instalar Python y herramientas básicas
 RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-venv \
-    python3-pip \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Crear enlace simbólico para python3
-RUN ln -s /usr/bin/python3.10 /usr/bin/python
-
-# Copiar requirements primero
 COPY requirements.txt .
 
-# Instalar PyTorch primero con versión específica
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-    torch==2.9.0 \
-    torchvision==0.20.0 \
-    torchaudio==2.9.0 \
-    --index-url https://download.pytorch.org/whl/cu121
+    pip install --no-cache-dir torch==2.9.0 --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip install --no-cache-dir -r requirements.txt
-# Instalar xformers con la versión correcta
-RUN pip install --no-cache-dir xformers==0.0.33.post1
+# VERSIONES COMPATIBLES
+RUN pip install --no-cache-dir \
+    transformers==4.46.0 \  
+    huggingface-hub==1.1.7 \
+    accelerate==0.30.1 \
+    Pillow==10.3.0 \
+    redis==5.0.6 \
+    psutil==5.9.8 \
+    python-dotenv==1.0.1
 
-# Instalar el resto de dependencias
-# 3. Crear directorios
-RUN mkdir -p /app/models /app/outputs
+# Instalar diffusers desde git
+RUN pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
 
-# 4. Copiar código
+RUN mkdir -p /app/models /app/outputs /app/src
 COPY src/ /app/src/
 
-# 5. Variables de entorno
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
-    TRANSFORMERS_CACHE=/app/models \
-    HF_HOME=/app/models \
-    TORCH_HOME=/app/models \
-    HF_HUB_OFFLINE=0 \
-    HF_HUB_DISABLE_TELEMETRY=1
+    DEVICE=cpu
 
-# 6. Comando
 CMD ["python", "/app/src/main.py"]

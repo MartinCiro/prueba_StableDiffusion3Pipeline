@@ -1,8 +1,8 @@
 from sys import exit
 from PIL import Image
-from os import getenv
+from os import getenv, environ
 from redis import Redis
-from hashlib import md5
+import hashlib
 from pathlib import Path
 from threading import Lock
 from datetime import datetime
@@ -13,6 +13,8 @@ from json import dumps, load, dump
 from typing import Dict, Optional, List, Any
 from diffusers import StableDiffusion3Pipeline, DPMSolverMultistepScheduler
 from torch import cuda, backends, float16, float32, Generator, inference_mode, autocast
+import torch
+import signal
 
 # Cargar variables de entorno
 load_dotenv()
@@ -69,11 +71,11 @@ class RedisImageCache:
             image_bytes = buffer.getvalue()
             
             # Guardar con clave comprimida
-            cache_key = f"sd3_img:{md5(key.encode()).hexdigest()}"
+            cache_key = f"sd3_img:{hashlib.md5(key.encode()).hexdigest()}"
             self.client.setex(cache_key, ttl, image_bytes)
             
             # Guardar metadata
-            meta_key = f"sd3_meta:{md5(key.encode()).hexdigest()}"
+            meta_key = f"sd3_meta:{hashlib.md5(key.encode()).hexdigest()}"
             metadata = {
                 "cached_at": datetime.now().isoformat(),
                 "key_hash": key,
@@ -93,7 +95,7 @@ class RedisImageCache:
             return None
         
         try:
-            cache_key = f"sd3_img:{md5(key.encode()).hexdigest()}"
+            cache_key = f"sd3_img:{hashlib.md5(key.encode()).hexdigest()}"
             image_bytes = self.client.get(cache_key)
             
             if image_bytes:
@@ -132,7 +134,7 @@ class RedisImageCache:
             return {"status": f"error: {str(e)}"}
 
 class SD3GeneratorSingleton:
-    """Singleton optimizado para SD3 con Redis"""
+    """Singleton optimizado para SD3 con Redis - Versión CPU"""
     
     _instance = None
     _lock = Lock()
@@ -149,13 +151,23 @@ class SD3GeneratorSingleton:
             self.initialized = False
             self._initialize()
     
+    # En tu código, modifica _initialize() en SD3GeneratorSingleton:
     def _initialize(self):
         """Inicialización diferida"""
-        print("🚀 Inicializando SD3 Generator con Redis...")
+        print("🚀 Inicializando SD3 Generator con Redis (CPU Mode)...")
         
-        # Configurar directorios
-        self.output_dir = Path(getenv('OUTPUT_DIR', '/app/outputs'))
+        # Forzar CPU desde variables de entorno
+        force_cpu = getenv('DEVICE', '').lower() == 'cpu'
+        if force_cpu:
+            environ['CUDA_VISIBLE_DEVICES'] = ''  # Deshabilitar CUDA
+        
+        # Configurar directorios - USAR DIRECTORIO ACTUAL
+        self.output_dir = Path(getenv('OUTPUT_DIR', './outputs'))
         self.output_dir.mkdir(exist_ok=True)
+        
+        # Directorio de modelos en directorio actual (sin permisos de sistema)
+        self.model_dir = Path(getenv('MODEL_CACHE_DIR', './models'))
+        self.model_dir.mkdir(exist_ok=True)
         
         # Configurar Redis
         redis_host = getenv('REDIS_HOST', 'redis')
@@ -180,33 +192,52 @@ class SD3GeneratorSingleton:
         self.model_loaded = False
         
         self.initialized = True
-        print("✅ SD3 Generator inicializado")
+        print("✅ SD3 Generator inicializado (CPU Mode)")
     
     def _select_device(self):
-        """Selecciona el mejor dispositivo disponible"""
-        if cuda.is_available():
-            # Verificar memoria GPU
-            gpu_memory = cuda.get_device_properties(0).total_memory / (1024**3)
-            if gpu_memory >= 6:  # Mínimo 6GB para SD3
-                print(f"✅ GPU disponible: {gpu_memory:.1f}GB")
-                return "cuda"
+        """Siempre usar CPU - versión optimizada"""
+        # Forzar CPU desde variable de entorno
+        force_cpu = getenv('DEVICE', '').lower() == 'cpu'
         
-        # Verificar RAM del sistema
-        system_memory = virtual_memory().total / (1024**3)
-        if system_memory >= 12:  # Mínimo 12GB para SD3 en CPU
-            print(f"⚠️  Usando CPU: {system_memory:.1f}GB RAM")
+        if force_cpu:
+            print("🔧 CPU forzado por configuración DEVICE=cpu")
             return "cpu"
         
-        print("❌ Sistema no cumple requisitos mínimos")
-        return "cpu"  # Fallback
+        # Intentar GPU solo si no está forzado CPU
+        try:
+            if cuda.is_available():
+                gpu_memory = cuda.get_device_properties(0).total_memory / (1024**3)
+                if gpu_memory >= 6:  # Mínimo 6GB para SD3
+                    print(f"✅ GPU disponible: {gpu_memory:.1f}GB")
+                    return "cuda"
+        except:
+            pass
+        
+        # Verificar RAM del sistema para CPU
+        system_memory = virtual_memory().total / (1024**3)
+        if system_memory >= 8:  # 8GB mínimo para SD3 en CPU
+            print(f"⚠️  Usando CPU: {system_memory:.1f}GB RAM disponible")
+            return "cpu"
+        
+        print("❌ Sistema no cumple requisitos mínimos de RAM (8GB)")
+        return "cpu"  # Fallback seguro
     
     def _configure_torch(self):
-        """Configura optimizaciones de PyTorch"""
+        """Configura optimizaciones de PyTorch para CPU"""
         # Optimizaciones generales
-        os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+        environ['TOKENIZERS_PARALLELISM'] = 'false'
+        environ['CUDA_VISIBLE_DEVICES'] = ''  # Asegurar que no use CUDA
         
-        if self.device == "cuda":
+        if self.device == "cpu":
+            # Optimizaciones específicas para CPU
+            try:
+                torch.set_num_threads(int(getenv('OMP_NUM_THREADS', 4)))
+                torch.set_num_interop_threads(1)
+                print(f"🔧 CPU threads configurados: {torch.get_num_threads()}")
+            except:
+                pass
+        else:
+            # Optimizaciones para GPU
             backends.cudnn.benchmark = True
             backends.cuda.matmul.allow_tf32 = True
             backends.cudnn.allow_tf32 = True
@@ -218,32 +249,32 @@ class SD3GeneratorSingleton:
                 "prompt": "hyperrealistic portrait photography of a unique synthetic human, detailed facial features, natural skin texture, professional studio lighting, sharp focus, 8k resolution, cinematic",
                 "negative": "blurry, deformed, cartoon, anime, 3d, render, worst quality",
                 "steps": 25,
-                "resolution": 768
+                "resolution": 512  # Reducido para CPU
             },
             "professional": {
                 "prompt": "corporate headshot of a professional adult, business attire, clean background, professional photography, sharp focus, realistic skin texture",
                 "negative": "casual, cartoon, blurry, deformed",
                 "steps": 20,
-                "resolution": 768
+                "resolution": 512  # Reducido para CPU
             },
             "cinematic": {
                 "prompt": "cinematic portrait of a character, dramatic lighting, film noir style, detailed facial expression, moody atmosphere, photorealistic",
                 "negative": "bright, happy, cartoon, anime",
                 "steps": 25,
-                "resolution": 768
+                "resolution": 512  # Reducido para CPU
             },
             "scifi": {
                 "prompt": "advanced synthetic human with cybernetic features mixed with organic tissue, sci-fi aesthetic, neon lighting, hyperdetailed, futuristic",
                 "negative": "historical, primitive, old, blurry",
                 "steps": 30,
-                "resolution": 768
+                "resolution": 512  # Reducido para CPU
             }
         }
     
     @lru_cache(maxsize=1)
     def _load_model(self):
-        """Carga el modelo SD3 (cached singleton)"""
-        print("🔧 Cargando SD3 Medium...")
+        """Carga el modelo SD3 optimizado para CPU"""
+        print("🔧 Cargando SD3 Medium (CPU Optimized)...")
         
         # Verificar token
         hf_token = getenv('HF_TOKEN')
@@ -253,8 +284,8 @@ class SD3GeneratorSingleton:
             return None
         
         try:
-            # Configurar dtype
-            torch_dtype = float16 if self.device == "cuda" else float32
+            # Siempre usar float32 para CPU (más estable)
+            torch_dtype = float32
             
             # Cargar modelo
             pipe = StableDiffusion3Pipeline.from_pretrained(
@@ -266,10 +297,18 @@ class SD3GeneratorSingleton:
                 cache_dir=getenv('MODEL_CACHE_DIR', '/app/models')
             )
             
-            # Optimizaciones
+            # Optimizaciones específicas para CPU
             if self.device == "cpu":
+                print("🔧 Aplicando optimizaciones para CPU...")
                 pipe.enable_sequential_cpu_offload()
                 pipe.enable_attention_slicing(1)
+                pipe.enable_vae_slicing()
+                
+                # Reducir uso de memoria
+                try:
+                    pipe.unet.to(memory_format=torch.channels_last)
+                except:
+                    pass
             else:
                 pipe = pipe.to(self.device)
                 try:
@@ -289,7 +328,7 @@ class SD3GeneratorSingleton:
             return pipe
             
         except Exception as e:
-            print(f"❌ Error cargando SD3: {str(e)[:150]}")
+            print(f"❌ Error cargando SD3: {str(e)[:200]}")
             return None
     
     def get_pipe(self):
@@ -306,13 +345,13 @@ class SD3GeneratorSingleton:
         return hashlib.sha256(key_data.encode()).hexdigest()
     
     def generate_image(self, 
-                      prompt: str, 
-                      negative_prompt: str = "",
-                      resolution: int = 768,
-                      steps: int = 25,
-                      preset: Optional[str] = None,
-                      use_cache: bool = True) -> Optional[Image.Image]:
-        """Genera imagen con cache multi-nivel"""
+                  prompt: str, 
+                  negative_prompt: str = "",
+                  resolution: int = 512,
+                  steps: int = 25,
+                  preset: Optional[str] = None,
+                  use_cache: bool = True) -> Optional[Image.Image]:
+        """Genera imagen con cache multi-nivel - optimizado para CPU"""
         
         # Usar preset si está especificado
         if preset and preset in self.prompts:
@@ -321,6 +360,11 @@ class SD3GeneratorSingleton:
             negative_prompt = config["negative"] if not negative_prompt else negative_prompt
             steps = config["steps"]
             resolution = config["resolution"]
+        
+        # Limitar resolución para CPU
+        if self.device == "cpu" and resolution > 512:
+            print(f"⚠️  Reduciendo resolución a 512px para CPU")
+            resolution = 512
         
         # Clave de cache
         cache_key = self._generate_cache_key(prompt, negative_prompt, resolution, steps)
@@ -339,7 +383,7 @@ class SD3GeneratorSingleton:
             return self.local_cache[cache_key].copy()
         
         # 3. Generar nueva
-        print(f"🎨 Generando nueva imagen {resolution}x{resolution}...")
+        print(f"🎨 Generando nueva imagen {resolution}x{resolution} (CPU Mode)...")
         
         pipe = self.get_pipe()
         if pipe is None:
@@ -347,45 +391,44 @@ class SD3GeneratorSingleton:
         
         try:
             # Seed determinística
-            seed = int(md5(prompt.encode()).hexdigest()[:8], 16) % 2**32
+            seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % 2**32
             generator = Generator(device=self.device).manual_seed(seed)
             
-            # Inference optimizado
-            with inference_mode(), autocast(self.device):
-                result = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    height=resolution,
-                    width=resolution,
-                    num_inference_steps=steps,
-                    guidance_scale=7.0,
-                    generator=generator,
-                    num_images_per_prompt=1,
-                    output_type="pil"
-                )
+            print(f"🔧 Configuración: {resolution}px, {steps} steps, seed: {seed}")
             
-            if result.images:
-                image = result.images[0]
-                
-                # Guardar en caches
-                self.local_cache[cache_key] = image.copy()
-                
-                if self.redis_cache.is_connected():
-                    self.redis_cache.cache_image(cache_key, image)
-                
-                print("✅ Imagen generada y cacheada")
-                return image
-            
-            return None
-            
-        except cuda.OutOfMemoryError:
-            print("⚠️  Memoria GPU insuficiente, reduciendo resolución...")
-            return self.generate_image(prompt, negative_prompt, 512, steps, preset, use_cache)
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                print("⚠️  Memoria insuficiente, usando CPU fallback...")
-                return self.generate_image(prompt, negative_prompt, 512, steps, preset, use_cache)
-            print(f"❌ Error: {str(e)[:80]}")
+            # Inference optimizado para CPU
+            with inference_mode():
+                if self.device == "cuda":
+                    with autocast(self.device):
+                        result = pipe(
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            height=resolution,
+                            width=resolution,
+                            num_inference_steps=steps,
+                            guidance_scale=7.0,
+                            generator=generator,
+                            num_images_per_prompt=1,
+                            output_type="pil"
+                        )
+                else:
+                    # Sin autocast para CPU
+                    result = pipe(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        height=resolution,
+                        width=resolution,
+                        num_inference_steps=steps,
+                        guidance_scale=7.0,
+                        generator=generator,
+                        num_images_per_prompt=1,
+                        output_type="pil"
+                    )
+        
+        except Exception as e:
+            print(f"❌ Error DETALLADO en generación: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()  # Muestra el traceback completo
             return None
     
     def save_result(self, image: Image.Image, prompt: str, 
@@ -399,11 +442,11 @@ class SD3GeneratorSingleton:
         filepath = self.output_dir / filename
         
         # Guardar imagen (WebP para mejor compresión)
-        image.save(filepath, 'WEBP', quality=90, optimize=True)
+        image.save(filepath, 'WEBP', quality=85, optimize=True)
         
         # Metadata
         metadata = {
-            "id": md5(f"{prompt}{timestamp}".encode()).hexdigest()[:16],
+            "id": hashlib.md5(f"{prompt}{timestamp}".encode()).hexdigest()[:16],
             "timestamp": timestamp,
             "prompt": prompt,
             "negative_prompt": negative,
@@ -412,7 +455,8 @@ class SD3GeneratorSingleton:
             "model": "Stable Diffusion 3 Medium",
             "device": self.device,
             "redis_cached": self.redis_cache.is_connected(),
-            "filepath": str(filepath)
+            "filepath": str(filepath),
+            "cpu_optimized": True if self.device == "cpu" else False
         }
         
         # Guardar metadata
@@ -429,20 +473,28 @@ class SD3GeneratorSingleton:
             "device": self.device,
             "model_loaded": self.model_loaded,
             "redis": self.redis_cache.get_stats(),
-            "local_cache_size": len(self.local_cache)
+            "local_cache_size": len(self.local_cache),
+            "cpu_optimized": True if self.device == "cpu" else False
         }
         
         # Información de memoria
         try:
             mem = virtual_memory()
             info["memory"] = {
-                "total_gb": mem.total / (1024**3),
-                "available_gb": mem.available / (1024**3),
+                "total_gb": round(mem.total / (1024**3), 2),
+                "available_gb": round(mem.available / (1024**3), 2),
                 "percent_used": mem.percent
             }
             
             if self.device == "cuda":
-                info["gpu_memory_gb"] = cuda.get_device_properties(0).total_memory / (1024**3)
+                info["gpu_memory_gb"] = round(cuda.get_device_properties(0).total_memory / (1024**3), 2)
+            
+            # Info CPU
+            import multiprocessing
+            info["cpu"] = {
+                "cores": multiprocessing.cpu_count(),
+                "threads": torch.get_num_threads() if self.device == "cpu" else "N/A"
+            }
         except:
             pass
         
@@ -452,22 +504,27 @@ class SD3GeneratorSingleton:
 def interactive_mode():
     """Modo interactivo con Redis"""
     print("\n" + "="*80)
-    print("🎬 SD3 MEDIUM GENERATOR - INTERACTIVE MODE")
+    print("🎬 SD3 MEDIUM GENERATOR - CPU MODE")
     print("="*80)
     
     generator = SD3GeneratorSingleton()
     info = generator.get_system_info()
     
     print("\n📊 SYSTEM INFO:")
-    print(f"   • Device: {info['device']}")
+    print(f"   • Device: {info['device'].upper()}")
+    print(f"   • CPU Optimized: {'✅ Yes' if info.get('cpu_optimized', False) else '❌ No'}")
     print(f"   • Model: {'✅ Loaded' if info['model_loaded'] else '❌ Not loaded'}")
     print(f"   • Redis: {info['redis'].get('status', 'unknown')}")
+    
+    if info.get('cpu'):
+        print(f"   • CPU Cores: {info['cpu'].get('cores', 'N/A')}")
+        print(f"   • CPU Threads: {info['cpu'].get('threads', 'N/A')}")
     
     if info['redis'].get('status') == 'connected':
         print(f"   • Images in cache: {info['redis'].get('images_cached', 0)}")
     
-    # Mostrar presets
-    print("\n🎭 AVAILABLE PRESETS:")
+    # Mostrar presets (resoluciones reducidas para CPU)
+    print("\n🎭 AVAILABLE PRESETS (CPU Optimized):")
     for i, (key, config) in enumerate(generator.prompts.items(), 1):
         print(f"   {i}. {key.title()} - {config['resolution']}px, {config['steps']} steps")
     
@@ -488,16 +545,16 @@ def interactive_mode():
         
         style = "custom"
         
-        print("\n📐 RESOLUTION:")
-        print("   1. 512x512 (Fast)")
-        print("   2. 768x768 (Recommended)")
-        print("   3. 1024x1024 (High quality)")
+        print("\n📐 RESOLUTION (CPU Optimized):")
+        print("   1. 384x384 (Very Fast)")
+        print("   2. 512x512 (Recommended for CPU)")
+        print("   3. 640x640 (High Quality)")
         
         res_choice = input("Select (1-3): ").strip()
-        resolutions = {"1": 512, "2": 768, "3": 1024}
-        resolution = resolutions.get(res_choice, 768)
+        resolutions = {"1": 384, "2": 512, "3": 640}
+        resolution = resolutions.get(res_choice, 512)
         
-        steps = 25 if resolution <= 768 else 30
+        steps = 20 if resolution <= 512 else 25
         
     else:
         # Usar preset
@@ -522,7 +579,8 @@ def interactive_mode():
             style = "hyperrealistic"
     
     # Generar
-    print(f"\n🚀 Generating {resolution}x{resolution} image...")
+    print(f"\n🚀 Generating {resolution}x{resolution} image (CPU Mode)...")
+    print("   This may take several minutes on CPU...")
     
     image = generator.generate_image(
         prompt=prompt,
@@ -546,7 +604,8 @@ def interactive_mode():
         
         print(f"\n🔧 CONFIGURATION:")
         print(f"   • Model: {metadata['model']}")
-        print(f"   • Device: {metadata['device']}")
+        print(f"   • Device: {metadata['device'].upper()}")
+        print(f"   • CPU Optimized: {'✅ Yes' if metadata.get('cpu_optimized', False) else '❌ No'}")
         print(f"   • Redis cached: {metadata['redis_cached']}")
         
         return metadata
@@ -556,7 +615,7 @@ def interactive_mode():
 
 def batch_mode():
     """Genera múltiples imágenes"""
-    print("\n🔢 BATCH MODE")
+    print("\n🔢 BATCH MODE (CPU Optimized)")
     
     generator = SD3GeneratorSingleton()
     
@@ -574,14 +633,15 @@ def batch_mode():
             indices = [int(x.strip()) - 1 for x in selection.split(',')]
             selected_presets = [presets[i] for i in indices if 0 <= i < len(presets)]
         except:
-            print("❌ Invalid selection, using all")
-            selected_presets = presets[:2]  # Limitar a 2 por defecto
+            print("❌ Invalid selection, using first 2")
+            selected_presets = presets[:2]
     
-    print(f"\n🔄 Generating {len(selected_presets)} images...")
+    print(f"\n🔄 Generating {len(selected_presets)} images on CPU...")
+    print("   This will take time. Please be patient.")
     
     results = []
-    for preset in selected_presets:
-        print(f"\n🎭 Generating {preset}...")
+    for i, preset in enumerate(selected_presets, 1):
+        print(f"\n🎭 [{i}/{len(selected_presets)}] Generating {preset}...")
         
         image = generator.generate_image(preset=preset)
         if image:
@@ -596,13 +656,16 @@ def batch_mode():
     return results
 
 def quick_mode():
-    """Modo rápido"""
-    print("\n⚡ QUICK MODE")
+    """Modo rápido para CPU"""
+    print("\n⚡ QUICK MODE (CPU Optimized)")
     
     generator = SD3GeneratorSingleton()
     
-    # Usar preset hyperrealistic
-    image = generator.generate_image(preset="hyperrealistic")
+    # Usar preset hyperrealistic con resolución reducida
+    print("Generating quick test image (512x512)...")
+    print("This may take 5-10 minutes on CPU...")
+    
+    image = generator.generate_image(preset="hyperrealistic", prompt="", negative_prompt="")
     
     if image:
         config = generator.prompts["hyperrealistic"]
@@ -610,16 +673,55 @@ def quick_mode():
         
         print(f"\n✅ Generated: {Path(metadata['filepath']).name}")
         print(f"📍 Location: {metadata['filepath']}")
+        print(f"⏱️  CPU Generation Complete")
         return metadata
     else:
         print("❌ Generation failed")
         return None
 
+def system_info_mode():
+    """Muestra información del sistema"""
+    generator = SD3GeneratorSingleton()
+    info = generator.get_system_info()
+    
+    print("\n" + "="*80)
+    print("📊 SYSTEM INFORMATION")
+    print("="*80)
+    
+    print(f"\n🔧 HARDWARE:")
+    print(f"   • Device: {info['device'].upper()}")
+    print(f"   • CPU Optimized: {'✅ Yes' if info.get('cpu_optimized', False) else '❌ No'}")
+    
+    if info.get('cpu'):
+        print(f"   • CPU Cores: {info['cpu']['cores']}")
+        print(f"   • CPU Threads: {info['cpu']['threads']}")
+    
+    if info.get('memory'):
+        print(f"\n💾 MEMORY:")
+        print(f"   • Total: {info['memory']['total_gb']} GB")
+        print(f"   • Available: {info['memory']['available_gb']} GB")
+        print(f"   • Used: {info['memory']['percent_used']}%")
+    
+    print(f"\n📦 MODELS & CACHE:")
+    print(f"   • SD3 Model: {'✅ Loaded' if info['model_loaded'] else '❌ Not loaded'}")
+    print(f"   • Local Cache: {info['local_cache_size']} images")
+    
+    print(f"\n🔗 REDIS:")
+    redis_status = info['redis'].get('status', 'unknown')
+    print(f"   • Status: {redis_status}")
+    if redis_status == 'connected':
+        print(f"   • Images Cached: {info['redis'].get('images_cached', 0)}")
+        print(f"   • Cache Size: {info['redis'].get('total_size_mb', 0):.2f} MB")
+    
+    print(f"\n🎨 PRESETS AVAILABLE: {len(generator.prompts)}")
+    for preset, config in generator.prompts.items():
+        print(f"   • {preset}: {config['resolution']}px, {config['steps']} steps")
+
 def main():
     """Función principal"""
     print("="*80)
-    print("🚀 STABLE DIFFUSION 3 MEDIUM + REDIS OPTIMIZED")
-    print("   Docker Compose | Multi-level Cache | High Performance")
+    print("🚀 STABLE DIFFUSION 3 MEDIUM - CPU OPTIMIZED")
+    print("   Redis Cache | Docker Compatible | CPU Only")
     print("="*80)
     
     # Verificar token
@@ -627,16 +729,21 @@ def main():
         print("\n❌ HF_TOKEN not configured!")
         print("   Set HF_TOKEN in .env file or environment variables")
         print("   Get token from: https://huggingface.co/settings/tokens")
+        print("\n💡 Example .env file:")
+        print("   HF_TOKEN=your_token_here")
+        print("   DEVICE=cpu")
+        print("   REDIS_HOST=localhost")
         return
     
     # Menú principal
     print("\n🎯 EXECUTION MODES:")
     print("   1. Interactive mode (choose prompts)")
-    print("   2. Quick mode (generate now)")
+    print("   2. Quick mode (generate test image)")
     print("   3. Batch mode (multiple images)")
     print("   4. System info")
+    print("   5. Exit")
     
-    mode = input("\nSelect mode (1-4): ").strip() or "1"
+    mode = input("\nSelect mode (1-5): ").strip() or "1"
     
     if mode == "1":
         interactive_mode()
@@ -645,18 +752,21 @@ def main():
     elif mode == "3":
         batch_mode()
     elif mode == "4":
-        generator = SD3GeneratorSingleton()
-        info = generator.get_system_info()
-        print("\n📊 SYSTEM INFORMATION:")
-        print(dumps(info, indent=2, default=str))
+        system_info_mode()
+    elif mode == "5":
+        print("\n👋 Goodbye!")
+        return
     
+    # Preguntar si continuar
     print("\n" + "="*80)
-    print("✨ Process completed")
+    cont = input("Continue? (y/n): ").strip().lower()
+    if cont == 'y' or cont == 'yes':
+        main()
+    else:
+        print("\n✨ Process completed")
 
 if __name__ == "__main__":
-    # Configuración para Docker
-    import signal
-    
+    # Configurar signal handlers para Docker
     def handle_exit(signum, frame):
         print("\n\n👋 Shutting down gracefully...")
         exit(0)
@@ -664,5 +774,20 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, handle_exit)
     signal.signal(signal.SIGTERM, handle_exit)
     
+    # Forzar CPU si no hay GPU disponible
+    if not torch.cuda.is_available():
+        environ['DEVICE'] = 'cpu'
+        print("ℹ️  GPU not available, forcing CPU mode")
+    
     # Ejecutar
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n👋 Interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        print("\n💡 TIPS for CPU Mode:")
+        print("   1. Reduce image resolution (384px or 512px)")
+        print("   2. Close other applications to free RAM")
+        print("   3. Increase swap space if needed")
+        print("   4. Use lower step count (20-25 steps)")

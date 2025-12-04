@@ -23,3 +23,5 @@ pip-wheel-metadata/
 share/python-wheels/
 *.egg-info
 shape_predictor*
+models
+shape_predictor_68_face_landmarks*

@@ -1,12 +1,11 @@
+# requirements_exact.txt
 torch==2.9.0
-torchvision>=0.16.0
-diffusers==0.25.0
-transformers>=4.35.0
-accelerate>=0.25.0
-Pillow>=10.0.0
-redis>=5.0.0
-psutil>=5.9.0
-python-dotenv>=1.0.0
-fastapi>=0.104.0  # Opcional para API
-uvicorn[standard]>=0.24.0  # Opcional para API
-aiofiles>=23.0.0  # Opcional para async
+--index-url https://download.pytorch.org/whl/cpu
+transformers==4.45.0
+huggingface-hub==1.1.7
+diffusers @ git+https://github.com/huggingface/diffusers.git@main
+accelerate==0.30.1
+Pillow==10.3.0
+redis==5.0.6
+psutil==5.9.8
+python-dotenv==1.0.1
