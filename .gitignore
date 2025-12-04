@@ -22,3 +22,4 @@ wheels/
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info
+shape_predictor*
