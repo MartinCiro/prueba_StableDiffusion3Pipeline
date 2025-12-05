@@ -1,0 +1,44 @@
+services:
+  comfyui:
+    build: .
+    image: comfyui:v0.3.76-cpu
+    container_name: comfyui
+    restart: unless-stopped
+    ports:
+      - "8188:8188"
+    
+    # Variables para optimización CPU
+    environment:
+      - USE_CPU=1
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - NUMEXPR_NUM_THREADS=4
+      - DISABLE_XFORMERS=1
+    
+    # Volúmenes esenciales
+    volumes:
+      - ./models:/ComfyUI/models
+      - ./output:/ComfyUI/output
+      - ./config:/ComfyUI/config
+      - ./custom_nodes:/ComfyUI/custom_nodes
+      - ./input:/ComfyUI/input
+    
+    # Límites de recursos para tu VPS (6 cores, 11GB RAM)
+    deploy:
+      resources:
+        limits:
+          cpus: '5.0'
+          memory: 9G
+        reservations:
+          cpus: '3.0'
+          memory: 6G
+    
+    # Comando optimizado
+    command: >
+      python main.py 
+      --listen 0.0.0.0 
+      --port 8188 
+      --cpu 
+      --disable-xformers
+      --force-fp32
+      --disable-smart-memory

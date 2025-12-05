@@ -1,0 +1,15 @@
+{
+  "aesthetic_score": false,
+  "preview_method": "latent2rgb",
+  "use_cpu_only": true,
+  "enable_cpu_optimizations": true,
+  "disable_all_optimizations": false,
+  "force_fp32": true,
+  "disable_xformers": true,
+  "lowvram_mode": true,
+  "disable_smart_memory": true,
+  "max_models_to_cache": 1,
+  "auto_clear_cache_after_generate": true,
+  "output_format": "png",
+  "output_quality": 85
+}

@@ -25,3 +25,7 @@ share/python-wheels/
 shape_predictor*
 models
 shape_predictor_68_face_landmarks*
+*.png
+*.jpg
+comfyui-*
+logs

@@ -1,0 +1,7 @@
+# Configuración para CPU
+base_path: /ComfyUI
+checkpoints: models/checkpoints
+loras: models/loras
+vae: models/vae
+upscale_models: models/upscale_models
+embeddings: models/embeddings
